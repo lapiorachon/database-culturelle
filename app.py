@@ -6,45 +6,45 @@
  commune + listes personnelles.
 =============================================================================
 """
-
+ 
 import os
 import time
 from datetime import date, datetime
-
+ 
 import pandas as pd
 import psycopg2
 import psycopg2.extras
 import streamlit as st
-
+ 
 try:
     import plotly.express as px
     PLOTLY_OK = True
 except ImportError:
     PLOTLY_OK = False
-
-
+ 
+ 
 # =============================================================================
 # 1. CONFIGURATION GÉNÉRALE DE LA PAGE
 # =============================================================================
-
+ 
 st.set_page_config(
     page_title="Cockpit Multimédia",
     page_icon="🏎️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
+ 
 STATUTS = ["PAL", "En cours", "Bibliothèque", "Abandonné"]
 TYPES_MEDIA = ["Livre", "Livre numérique", "Manga", "BD/Comics", "Film", "Série", "Anime"]
-
+ 
 # Intervalle (en secondes) de la synchronisation automatique en arrière-plan.
 AUTO_SYNC_INTERVAL = 25
-
-
+ 
+ 
 # =============================================================================
 # 2. THÈME "RACING" — CSS INJECTÉ
 # =============================================================================
-
+ 
 RACING_CSS = """
 <style>
     /* Fond général sombre */
@@ -52,19 +52,19 @@ RACING_CSS = """
         background: radial-gradient(circle at top left, #1a1a1a 0%, #0a0a0a 60%);
         color: #f5f5f5;
     }
-
+ 
     /* Police plus agressive pour les titres */
     h1, h2, h3 {
         font-family: 'Arial Black', 'Helvetica Neue', sans-serif;
         letter-spacing: 1px;
         text-transform: uppercase;
     }
-
+ 
     h1 {
         color: #ffffff;
         text-shadow: 0 0 8px #e10600, 0 0 18px rgba(225, 6, 0, 0.5);
     }
-
+ 
     /* Bandeau de tête type "drapeau à damier" */
     .cockpit-header {
         display: flex;
@@ -77,7 +77,7 @@ RACING_CSS = """
         margin-bottom: 18px;
         box-shadow: 0 4px 18px rgba(0,0,0,0.6);
     }
-
+ 
     .cockpit-title {
         font-size: 28px;
         font-weight: 900;
@@ -85,7 +85,7 @@ RACING_CSS = """
         text-transform: uppercase;
         letter-spacing: 2px;
     }
-
+ 
     /* Badge de synchronisation lumineux */
     .live-badge {
         display: inline-flex;
@@ -103,7 +103,7 @@ RACING_CSS = """
         box-shadow: 0 0 10px rgba(0, 230, 118, 0.55);
         animation: pulseGlow 1.8s infinite;
     }
-
+ 
     .live-dot {
         width: 9px;
         height: 9px;
@@ -111,7 +111,7 @@ RACING_CSS = """
         border-radius: 50%;
         box-shadow: 0 0 6px #00e676;
     }
-
+ 
     .live-badge-error {
         display: inline-flex;
         align-items: center;
@@ -126,13 +126,13 @@ RACING_CSS = """
         letter-spacing: 1px;
         text-transform: uppercase;
     }
-
+ 
     @keyframes pulseGlow {
         0%   { box-shadow: 0 0 6px rgba(0, 230, 118, 0.4); }
         50%  { box-shadow: 0 0 16px rgba(0, 230, 118, 0.9); }
         100% { box-shadow: 0 0 6px rgba(0, 230, 118, 0.4); }
     }
-
+ 
     /* Cartes d'œuvres */
     .media-card {
         background: linear-gradient(160deg, #181818 0%, #101010 100%);
@@ -147,7 +147,7 @@ RACING_CSS = """
         border-left: 4px solid #00e676;
         box-shadow: 0 0 14px rgba(0,0,0,0.5);
     }
-
+ 
     /* Boutons */
     .stButton > button {
         background: linear-gradient(180deg, #e10600 0%, #a30400 100%);
@@ -163,7 +163,7 @@ RACING_CSS = """
         background: linear-gradient(180deg, #ff1a14 0%, #c30500 100%);
         box-shadow: 0 0 12px rgba(225,6,0,0.6);
     }
-
+ 
     /* Onglets */
     .stTabs [data-baseweb="tab-list"] {
         gap: 6px;
@@ -180,7 +180,7 @@ RACING_CSS = """
         background-color: #e10600 !important;
         color: white !important;
     }
-
+ 
     /* Sidebar */
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0d0d0d 0%, #161616 100%);
@@ -188,19 +188,19 @@ RACING_CSS = """
     }
 </style>
 """
-
+ 
 st.markdown(RACING_CSS, unsafe_allow_html=True)
-
-
+ 
+ 
 # =============================================================================
 # 3. CONNEXION POSTGRESQL — SÉCURISÉE & RÉSILIENTE
 # =============================================================================
-
+ 
 def get_connection_params():
     """
     Récupère les paramètres de connexion PostgreSQL depuis les variables
     d'environnement / st.secrets.
-
+ 
     Compatible avec :
       - Neon / Supabase via une URL complète DATABASE_URL
       - Google Cloud SQL via host/port/dbname/user/password séparés
@@ -208,7 +208,7 @@ def get_connection_params():
     database_url = os.environ.get("DATABASE_URL") or st.secrets.get("DATABASE_URL", None)
     if database_url:
         return {"dsn": database_url}
-
+ 
     return {
         "host": os.environ.get("PGHOST") or st.secrets.get("PGHOST", ""),
         "port": os.environ.get("PGPORT") or st.secrets.get("PGPORT", "5432"),
@@ -217,8 +217,8 @@ def get_connection_params():
         "password": os.environ.get("PGPASSWORD") or st.secrets.get("PGPASSWORD", ""),
         "sslmode": os.environ.get("PGSSLMODE") or st.secrets.get("PGSSLMODE", "require"),
     }
-
-
+ 
+ 
 def open_connection():
     """
     Ouvre une nouvelle connexion PostgreSQL avec autocommit activé.
@@ -238,8 +238,8 @@ def open_connection():
         )
     conn.autocommit = True  # Autocommit activé : pas de gel de données après écriture.
     return conn
-
-
+ 
+ 
 def get_db_connection():
     """
     Retourne une connexion PostgreSQL valide, stockée en session_state.
@@ -257,29 +257,45 @@ def get_db_connection():
             except Exception:
                 pass
             st.session_state["_pg_conn"] = None
-
+ 
     new_conn = open_connection()
     st.session_state["_pg_conn"] = new_conn
     return new_conn
-
-
+ 
+ 
+def _executer_sans_bloquer(cur, sql: str):
+    """
+    Exécute une instruction SQL d'initialisation sans jamais faire planter
+    l'application : si la table/séquence/colonne existe déjà (cas d'un
+    redémarrage ou d'une double exécution du script), l'erreur est avalée
+    silencieusement plutôt que de remonter jusqu'à l'écran.
+    """
+    try:
+        cur.execute(sql)
+    except Exception:
+        # Conflit bénin (objet déjà existant) : on l'ignore et on continue.
+        cur.connection.rollback()
+ 
+ 
 def init_database():
     """
     Crée les tables nécessaires si elles n'existent pas, et ajoute les
     colonnes 'date_debut' / 'date_fin' si elles sont absentes (ALTER TABLE
-    ... ADD COLUMN IF NOT EXISTS) afin de ne jamais faire crasher l'app.
+    ... ADD COLUMN IF NOT EXISTS) afin de ne jamais faire crasher l'app,
+    même si cette fonction est appelée plusieurs fois (redémarrages,
+    rechargements multiples, etc.).
     """
     conn = get_db_connection()
     with conn.cursor() as cur:
-        cur.execute("""
+        _executer_sans_bloquer(cur, """
             CREATE TABLE IF NOT EXISTS utilisateurs (
                 id SERIAL PRIMARY KEY,
                 nom TEXT UNIQUE NOT NULL,
                 cree_le TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-
-        cur.execute("""
+ 
+        _executer_sans_bloquer(cur, """
             CREATE TABLE IF NOT EXISTS oeuvres (
                 id SERIAL PRIMARY KEY,
                 titre TEXT NOT NULL,
@@ -298,18 +314,18 @@ def init_database():
                 modifie_le TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-
+ 
         # Ajout résilient des colonnes de dates si elles manquent encore.
-        cur.execute("ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_debut DATE;")
-        cur.execute("ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_fin DATE;")
-
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_debut DATE;")
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_fin DATE;")
+ 
     conn.commit()  # db.commit() explicite, même si autocommit est actif.
-
-
+ 
+ 
 # =============================================================================
 # 4. FONCTIONS D'ACCÈS AUX DONNÉES (CRUD)
 # =============================================================================
-
+ 
 def fetch_oeuvres(statut=None):
     """Récupère les œuvres, éventuellement filtrées par statut."""
     conn = get_db_connection()
@@ -323,8 +339,8 @@ def fetch_oeuvres(statut=None):
             cur.execute("SELECT * FROM oeuvres ORDER BY modifie_le DESC;")
         rows = cur.fetchall()
     return [dict(r) for r in rows]
-
-
+ 
+ 
 def insert_oeuvre(data: dict):
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -343,8 +359,8 @@ def insert_oeuvre(data: dict):
             data,
         )
     conn.commit()
-
-
+ 
+ 
 def update_oeuvre(oeuvre_id: int, data: dict):
     conn = get_db_connection()
     data = dict(data)
@@ -372,8 +388,8 @@ def update_oeuvre(oeuvre_id: int, data: dict):
             data,
         )
     conn.commit()
-
-
+ 
+ 
 def update_statut(oeuvre_id: int, nouveau_statut: str):
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -382,23 +398,23 @@ def update_statut(oeuvre_id: int, nouveau_statut: str):
             (nouveau_statut, oeuvre_id),
         )
     conn.commit()
-
-
+ 
+ 
 def delete_oeuvre(oeuvre_id: int):
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute("DELETE FROM oeuvres WHERE id = %s;", (oeuvre_id,))
     conn.commit()
-
-
+ 
+ 
 def fetch_utilisateurs():
     conn = get_db_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM utilisateurs ORDER BY nom;")
         rows = cur.fetchall()
     return [dict(r) for r in rows]
-
-
+ 
+ 
 def creer_utilisateur(nom: str):
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -407,12 +423,12 @@ def creer_utilisateur(nom: str):
             (nom,),
         )
     conn.commit()
-
-
+ 
+ 
 # =============================================================================
 # 5. UTILITAIRES D'AFFICHAGE
 # =============================================================================
-
+ 
 def format_date_fr(d):
     """Formate une date Python en JJ/MM/AAAA, ou '—' si vide."""
     if d is None:
@@ -423,27 +439,27 @@ def format_date_fr(d):
         except ValueError:
             return d
     return d.strftime("%d/%m/%Y")
-
-
+ 
+ 
 def afficher_etoiles(note):
     if not note:
         return "Pas encore noté"
     note = int(note)
     return "⭐" * note + "☆" * (5 - note)
-
-
+ 
+ 
 def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
     """Affiche une œuvre sous forme de carte stylisée 'Racing'."""
     with st.container():
         st.markdown('<div class="media-card">', unsafe_allow_html=True)
         col_img, col_info, col_actions = st.columns([1, 4, 2])
-
+ 
         with col_img:
             if oeuvre.get("image_url"):
                 st.image(oeuvre["image_url"], width=80)
             else:
                 st.markdown("📚")
-
+ 
         with col_info:
             st.markdown(f"**{oeuvre['titre']}**  ·  _{oeuvre['type_media']}_")
             sous_ligne = []
@@ -457,70 +473,70 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
                 sous_ligne.append(f"🎭 {oeuvre['genre']}")
             if sous_ligne:
                 st.caption(" • ".join(sous_ligne))
-
+ 
             if oeuvre.get("note"):
                 st.markdown(afficher_etoiles(oeuvre["note"]))
-
+ 
             if oeuvre.get("commentaire"):
                 st.caption(f"💬 {oeuvre['commentaire']}")
-
+ 
             if afficher_periode and (oeuvre.get("date_debut") or oeuvre.get("date_fin")):
                 st.markdown(
                     f"🗓️ Période : du **{format_date_fr(oeuvre.get('date_debut'))}** "
                     f"au **{format_date_fr(oeuvre.get('date_fin'))}**"
                 )
-
+ 
             if oeuvre.get("proprietaire"):
                 st.caption(f"👤 {oeuvre['proprietaire']}")
-
+ 
         with col_actions:
             cle_base = f"oeuvre_{oeuvre['id']}"
-
+ 
             if oeuvre["statut"] == "PAL":
                 if st.button("▶️ Commencer", key=f"{cle_base}_commencer", use_container_width=True):
                     update_statut(oeuvre["id"], "En cours")
                     st.rerun()
                 if st.button("📦 → Bibliothèque", key=f"{cle_base}_transfert", use_container_width=True):
                     st.session_state["dialog_transfert_id"] = oeuvre["id"]
-
+ 
             elif oeuvre["statut"] == "En cours":
                 if st.button("📦 Terminer", key=f"{cle_base}_terminer", use_container_width=True):
                     st.session_state["dialog_transfert_id"] = oeuvre["id"]
                 if st.button("⛔ Abandonner", key=f"{cle_base}_abandon", use_container_width=True):
                     update_statut(oeuvre["id"], "Abandonné")
                     st.rerun()
-
+ 
             elif oeuvre["statut"] == "Abandonné":
                 if st.button("↩️ Reprendre", key=f"{cle_base}_reprendre", use_container_width=True):
                     update_statut(oeuvre["id"], "En cours")
                     st.rerun()
-
+ 
             if st.button("🗑️ Supprimer", key=f"{cle_base}_suppr", use_container_width=True):
                 delete_oeuvre(oeuvre["id"])
                 st.rerun()
-
+ 
         st.markdown("</div>", unsafe_allow_html=True)
-
-
+ 
+ 
 # =============================================================================
 # 6. FENÊTRE MODALE — TRANSFERT PAL / EN COURS → BIBLIOTHÈQUE
 # =============================================================================
-
+ 
 @st.dialog("📦 Transfert vers la Bibliothèque", width="large")
 def dialog_transfert(oeuvre_id: int):
     conn = get_db_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM oeuvres WHERE id = %s;", (oeuvre_id,))
         oeuvre = cur.fetchone()
-
+ 
     if oeuvre is None:
         st.error("Cette œuvre n'existe plus.")
         return
-
+ 
     oeuvre = dict(oeuvre)
-
+ 
     col1, col2 = st.columns(2, gap="large")
-
+ 
     with col1:
         titre = st.text_input("Titre", value=oeuvre.get("titre") or "")
         saga = st.text_input("Saga", value=oeuvre.get("saga") or "")
@@ -529,7 +545,7 @@ def dialog_transfert(oeuvre_id: int):
             "Date de début",
             value=oeuvre.get("date_debut") or date.today(),
         )
-
+ 
     with col2:
         genre = st.text_input("Genre", value=oeuvre.get("genre") or "")
         note = st.slider("Note / Avis (étoiles)", min_value=0, max_value=5, value=oeuvre.get("note") or 0)
@@ -538,7 +554,7 @@ def dialog_transfert(oeuvre_id: int):
             "Date de fin",
             value=oeuvre.get("date_fin") or date.today(),
         )
-
+ 
     st.markdown("---")
     col_spacer, col_btn = st.columns([3, 1])
     with col_btn:
@@ -564,12 +580,12 @@ def dialog_transfert(oeuvre_id: int):
             st.session_state["dialog_transfert_id"] = None
             st.success("Œuvre transférée vers la Bibliothèque !")
             st.rerun()
-
-
+ 
+ 
 # =============================================================================
 # 7. FORMULAIRE D'AJOUT D'UNE NOUVELLE ŒUVRE
 # =============================================================================
-
+ 
 def formulaire_ajout(proprietaire_defaut: str):
     with st.expander("➕ Ajouter une nouvelle œuvre", expanded=False):
         with st.form("form_ajout_oeuvre", clear_on_submit=True):
@@ -586,9 +602,9 @@ def formulaire_ajout(proprietaire_defaut: str):
                 image_url = st.text_input("URL de l'image de couverture")
                 statut_initial = st.selectbox("Statut initial", STATUTS)
                 commentaire = st.text_area("Commentaire / Avis")
-
+ 
             submitted = st.form_submit_button("🏁 Ajouter à la collection", use_container_width=True)
-
+ 
             if submitted:
                 if not titre.strip():
                     st.warning("Le titre est obligatoire.")
@@ -611,30 +627,30 @@ def formulaire_ajout(proprietaire_defaut: str):
                     })
                     st.success(f"« {titre} » a été ajouté !")
                     st.rerun()
-
-
+ 
+ 
 # =============================================================================
 # 8. ONGLET TABLEAU DE BORD (STATS & GRAPHIQUES)
 # =============================================================================
-
+ 
 def onglet_tableau_de_bord(toutes_oeuvres: list):
     st.subheader("📊 Tableau de bord de la collection")
-
+ 
     if not toutes_oeuvres:
         st.info("Aucune œuvre enregistrée pour le moment. Ajoute ta première œuvre ci-dessus !")
         return
-
+ 
     df = pd.DataFrame(toutes_oeuvres)
-
+ 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📦 Total œuvres", len(df))
     col2.metric("✅ Terminées", int((df["statut"] == "Bibliothèque").sum()))
     col3.metric("▶️ En cours", int((df["statut"] == "En cours").sum()))
     col4.metric("⏳ En attente (PAL)", int((df["statut"] == "PAL").sum()))
-
+ 
     st.markdown("---")
     col_a, col_b = st.columns(2)
-
+ 
     with col_a:
         st.markdown("**Répartition par statut**")
         repartition_statut = df["statut"].value_counts().reset_index()
@@ -653,7 +669,7 @@ def onglet_tableau_de_bord(toutes_oeuvres: list):
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.bar_chart(repartition_statut.set_index("Statut"))
-
+ 
     with col_b:
         st.markdown("**Répartition par type de média**")
         repartition_type = df["type_media"].value_counts().reset_index()
@@ -673,7 +689,7 @@ def onglet_tableau_de_bord(toutes_oeuvres: list):
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.bar_chart(repartition_type.set_index("Type"))
-
+ 
     if "note" in df.columns and df["note"].notna().any():
         st.markdown("---")
         st.markdown("**Distribution des notes (œuvres terminées)**")
@@ -693,22 +709,22 @@ def onglet_tableau_de_bord(toutes_oeuvres: list):
             st.plotly_chart(fig3, use_container_width=True)
         else:
             st.bar_chart(df_notes["note"].value_counts().sort_index())
-
+ 
     if "proprietaire" in df.columns and df["proprietaire"].notna().any():
         st.markdown("---")
         st.markdown("**Contributions par utilisateur**")
         repartition_user = df["proprietaire"].value_counts().reset_index()
         repartition_user.columns = ["Utilisateur", "Nombre"]
         st.dataframe(repartition_user, use_container_width=True, hide_index=True)
-
-
+ 
+ 
 # =============================================================================
 # 9. ONGLET PAR STATUT (AVEC FILTRES)
 # =============================================================================
-
+ 
 def onglet_statut(statut: str, toutes_oeuvres: list):
     oeuvres_du_statut = [o for o in toutes_oeuvres if o["statut"] == statut]
-
+ 
     with st.expander("🔍 Filtres", expanded=False):
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -726,7 +742,7 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
             filtre_recherche = st.text_input(
                 "Recherche par titre", key=f"filtre_recherche_{statut}"
             )
-
+ 
     resultat = oeuvres_du_statut
     if filtre_type:
         resultat = [o for o in resultat if o["type_media"] in filtre_type]
@@ -737,25 +753,25 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
             o for o in resultat
             if filtre_recherche.lower() in (o["titre"] or "").lower()
         ]
-
+ 
     st.caption(f"{len(resultat)} œuvre(s) affichée(s) sur {len(oeuvres_du_statut)} au total")
-
+ 
     if not resultat:
         st.info("Aucune œuvre ne correspond à ces critères dans cette section.")
         return
-
+ 
     afficher_periode = statut == "Bibliothèque"
     for oeuvre in resultat:
         afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode)
-
+ 
         if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
             dialog_transfert(oeuvre["id"])
-
-
+ 
+ 
 # =============================================================================
 # 10. FRAGMENT DE SYNCHRONISATION AUTOMATIQUE
 # =============================================================================
-
+ 
 @st.fragment(run_every=AUTO_SYNC_INTERVAL)
 def fragment_sync_auto():
     """
@@ -767,12 +783,12 @@ def fragment_sync_auto():
     """
     st.session_state["derniere_sync"] = datetime.now().strftime("%H:%M:%S")
     st.caption(f"🔄 Dernière synchro auto : {st.session_state['derniere_sync']}")
-
-
+ 
+ 
 # =============================================================================
 # 11. EN-TÊTE DU COCKPIT
 # =============================================================================
-
+ 
 def afficher_entete(connexion_ok: bool):
     badge = (
         '<span class="live-badge"><span class="live-dot"></span> POSTGRES_LIVE_SYNC</span>'
@@ -788,12 +804,12 @@ def afficher_entete(connexion_ok: bool):
         """,
         unsafe_allow_html=True,
     )
-
-
+ 
+ 
 # =============================================================================
 # 12. APPLICATION PRINCIPALE
 # =============================================================================
-
+ 
 def main():
     connexion_ok = False
     try:
@@ -803,9 +819,9 @@ def main():
         afficher_entete(connexion_ok=False)
         st.error(f"BASE INDISPONIBLE : {str(e)}")
         st.stop()
-
+ 
     afficher_entete(connexion_ok=True)
-
+ 
     # --- Sidebar : sélection / création de l'utilisateur ---
     with st.sidebar:
         st.markdown("### 👤 Profil")
@@ -814,14 +830,14 @@ def main():
         except Exception as e:
             st.error(f"BASE INDISPONIBLE : {str(e)}")
             st.stop()
-
+ 
         noms_utilisateurs = [u["nom"] for u in utilisateurs]
-
+ 
         choix = st.selectbox(
             "Utilisateur actif",
             options=["— Choisir —"] + noms_utilisateurs + ["➕ Nouvel utilisateur"],
         )
-
+ 
         if choix == "➕ Nouvel utilisateur":
             nouveau_nom = st.text_input("Prénom du nouvel utilisateur")
             if st.button("Créer le profil") and nouveau_nom.strip():
@@ -830,33 +846,33 @@ def main():
                 st.rerun()
         elif choix != "— Choisir —":
             st.session_state["utilisateur_actif"] = choix
-
+ 
         utilisateur_actif = st.session_state.get("utilisateur_actif", "Invité")
         st.success(f"Connecté en tant que **{utilisateur_actif}**")
-
+ 
         st.markdown("---")
         st.markdown("### 🔄 Synchronisation")
         if st.button("🔁 Actualiser maintenant", use_container_width=True):
             st.rerun()
         fragment_sync_auto()
-
+ 
     # --- Récupération des données ---
     try:
         toutes_oeuvres = fetch_oeuvres()
     except Exception as e:
         st.error(f"BASE INDISPONIBLE : {str(e)}")
         st.stop()
-
+ 
     # --- Formulaire d'ajout ---
     formulaire_ajout(proprietaire_defaut=utilisateur_actif)
-
+ 
     st.markdown("---")
-
+ 
     # --- Onglets : 4 statuts + tableau de bord ---
     tab_pal, tab_cours, tab_biblio, tab_abandon, tab_dashboard = st.tabs([
         "⏳ PAL", "▶️ En cours", "📚 Bibliothèque", "⛔ Abandonné", "📊 Tableau de bord"
     ])
-
+ 
     with tab_pal:
         onglet_statut("PAL", toutes_oeuvres)
     with tab_cours:
@@ -867,7 +883,8 @@ def main():
         onglet_statut("Abandonné", toutes_oeuvres)
     with tab_dashboard:
         onglet_tableau_de_bord(toutes_oeuvres)
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
+ 

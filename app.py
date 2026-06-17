@@ -354,6 +354,18 @@ def init_database():
         # Marqueur "Je recommande" — coché lors du transfert vers la Bibliothèque.
         _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS recommande BOOLEAN DEFAULT FALSE;")
  
+        # Affiche personnalisée par saga (indépendante des tomes individuels).
+        # Si aucune entrée n'existe pour une saga, l'affiche du dernier tome
+        # ajouté est utilisée automatiquement à l'affichage.
+        _executer_sans_bloquer(cur, """
+            CREATE TABLE IF NOT EXISTS affiches_saga (
+                saga TEXT PRIMARY KEY,
+                image_url TEXT,
+                image_data TEXT,
+                modifie_le TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+ 
     conn.commit()  # db.commit() explicite, même si autocommit est actif.
  
  
@@ -458,6 +470,42 @@ def fetch_utilisateurs():
     return [dict(r) for r in rows]
  
  
+def fetch_affiches_saga():
+    """Retourne un dictionnaire {nom_de_saga: {image_url, image_data}} pour
+    toutes les affiches personnalisées enregistrées."""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM affiches_saga;")
+        rows = cur.fetchall()
+    return {r["saga"]: dict(r) for r in rows}
+ 
+ 
+def set_affiche_saga(saga: str, image_url: str = None, image_data: str = None):
+    """Enregistre ou met à jour l'affiche personnalisée d'une saga."""
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO affiches_saga (saga, image_url, image_data, modifie_le)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (saga) DO UPDATE SET
+                image_url = EXCLUDED.image_url,
+                image_data = EXCLUDED.image_data,
+                modifie_le = CURRENT_TIMESTAMP;
+            """,
+            (saga, image_url, image_data),
+        )
+    conn.commit()
+ 
+ 
+def supprimer_affiche_saga(saga: str):
+    """Supprime l'affiche personnalisée d'une saga (retour à l'affiche automatique)."""
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM affiches_saga WHERE saga = %s;", (saga,))
+    conn.commit()
+ 
+ 
 def creer_utilisateur(nom: str):
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -514,6 +562,29 @@ def get_image_source(oeuvre: dict):
     if oeuvre.get("image_url"):
         return oeuvre["image_url"]
     return None
+ 
+ 
+def get_affiche_saga(saga: str, membres: list, affiches_saga: dict):
+    """
+    Détermine l'affiche à afficher pour un groupe de saga :
+    1. Si une affiche personnalisée a été enregistrée pour cette saga, elle
+       est prioritaire.
+    2. Sinon, on retombe automatiquement sur l'image du dernier tome ajouté
+       (le plus récent par date de création).
+    Retourne (source_image_ou_None, a_une_affiche_personnalisee: bool).
+    """
+    affiche_perso = affiches_saga.get(saga)
+    if affiche_perso and (affiche_perso.get("image_data") or affiche_perso.get("image_url")):
+        if affiche_perso.get("image_data"):
+            return f"data:image/png;base64,{affiche_perso['image_data']}", True
+        return affiche_perso["image_url"], True
+ 
+    # Pas d'affiche personnalisée : on prend l'image du tome le plus récent.
+    membres_avec_image = [m for m in membres if get_image_source(m)]
+    if not membres_avec_image:
+        return None, False
+    dernier = max(membres_avec_image, key=lambda m: m.get("cree_le") or "")
+    return get_image_source(dernier), False
  
  
 def _cle_tri_saison_tome(oeuvre: dict):
@@ -950,21 +1021,64 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
         else:
             oeuvres_isolees.append(oeuvre)
  
+    affiches_saga = fetch_affiches_saga()
+ 
     # Affichage des groupes de saga, triés alphabétiquement.
     for saga in sorted(groupes_saga.keys(), key=str.lower):
         membres = sorted(groupes_saga[saga], key=_cle_tri_saison_tome)
         nb = len(membres)
         libelle_nb = f"{nb} élément{'s' if nb > 1 else ''}"
-        with st.expander(f"📖 **{saga}** — {libelle_nb}", expanded=False):
-            for oeuvre in membres:
-                label_tome = oeuvre.get("saison_tome") or oeuvre["titre"]
-                statut_emoji = {
-                    "PAL": "⏳", "En cours": "▶️", "Bibliothèque": "✅", "Abandonné": "⛔"
-                }.get(oeuvre["statut"], "")
-                with st.popover(f"🔖 {label_tome}  {statut_emoji}", use_container_width=True):
-                    afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode, dans_groupe=True)
-                    if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
-                        dialog_transfert(oeuvre["id"])
+ 
+        source_affiche, est_personnalisee = get_affiche_saga(saga, membres, affiches_saga)
+ 
+        col_affiche, col_groupe = st.columns([1, 6])
+        with col_affiche:
+            if source_affiche:
+                st.image(source_affiche, width=90)
+            else:
+                st.markdown("📖")
+            with st.popover("🖼️ Modifier l'affiche", use_container_width=True):
+                st.caption(f"Affiche de la saga « {saga} »")
+                nouvelle_url = st.text_input(
+                    "URL de l'image", key=f"affiche_url_{statut}_{saga}"
+                )
+                nouvel_upload = st.file_uploader(
+                    "...ou charge une image depuis ton appareil",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key=f"affiche_upload_{statut}_{saga}",
+                )
+                col_valider, col_reset = st.columns(2)
+                with col_valider:
+                    if st.button("✅ Valider", key=f"affiche_valider_{statut}_{saga}", use_container_width=True):
+                        image_data_b64 = None
+                        if nouvel_upload is not None:
+                            image_data_b64 = base64.b64encode(nouvel_upload.read()).decode("utf-8")
+                        set_affiche_saga(
+                            saga,
+                            image_url=nouvelle_url or None,
+                            image_data=image_data_b64,
+                        )
+                        st.success("Affiche mise à jour !")
+                        st.rerun()
+                with col_reset:
+                    if est_personnalisee and st.button(
+                        "↩️ Auto", key=f"affiche_reset_{statut}_{saga}", use_container_width=True
+                    ):
+                        supprimer_affiche_saga(saga)
+                        st.success("Retour à l'affiche automatique.")
+                        st.rerun()
+ 
+        with col_groupe:
+            with st.expander(f"📖 **{saga}** — {libelle_nb}", expanded=False):
+                for oeuvre in membres:
+                    label_tome = oeuvre.get("saison_tome") or oeuvre["titre"]
+                    statut_emoji = {
+                        "PAL": "⏳", "En cours": "▶️", "Bibliothèque": "✅", "Abandonné": "⛔"
+                    }.get(oeuvre["statut"], "")
+                    with st.popover(f"🔖 {label_tome}  {statut_emoji}", use_container_width=True):
+                        afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode, dans_groupe=True)
+                        if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
+                            dialog_transfert(oeuvre["id"])
  
     # Affichage des œuvres isolées (sans saga), comme avant.
     for oeuvre in oeuvres_isolees:

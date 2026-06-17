@@ -7,6 +7,7 @@
 =============================================================================
 """
  
+import base64
 import os
 import time
 from datetime import date, datetime
@@ -36,6 +37,20 @@ st.set_page_config(
  
 STATUTS = ["PAL", "En cours", "Bibliothèque", "Abandonné"]
 TYPES_MEDIA = ["Livre", "Livre numérique", "Manga", "BD/Comics", "Film", "Série", "Anime"]
+LANGUES = ["Français", "Anglais", "Japonais", "Coréen", "Espagnol", "Autre"]
+ 
+# Pour chaque type de média : (label affiché du champ quantité, unité courte)
+# Cela permet d'adapter dynamiquement le formulaire ET de calculer les stats
+# cumulées (durée totale des films, épisodes totaux, pages totales, etc.)
+QUANTITE_PAR_TYPE = {
+    "Livre": ("Nombre de pages", "pages"),
+    "BD/Comics": ("Nombre de pages", "pages"),
+    "Manga": ("Nombre de pages", "pages"),
+    "Livre numérique": ("Nombre de chapitres", "chapitres"),
+    "Film": ("Durée (en minutes)", "min"),
+    "Série": ("Nombre d'épisodes", "épisodes"),
+    "Anime": ("Nombre d'épisodes", "épisodes"),
+}
  
 # Intervalle (en secondes) de la synchronisation automatique en arrière-plan.
 AUTO_SYNC_INTERVAL = 25
@@ -325,6 +340,16 @@ def init_database():
         _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_debut DATE;")
         _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS date_fin DATE;")
  
+        # Nouvelles colonnes : langue, piment (contenu sexuel/érotique),
+        # plateforme de visionnage/lecture, quantité numérique (pages,
+        # épisodes, minutes, chapitres selon le type de média), et image
+        # uploadée directement (en plus de l'URL).
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS langue TEXT;")
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS piment INTEGER;")
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS plateforme TEXT;")
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS quantite INTEGER;")
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS image_data TEXT;")
+ 
     conn.commit()  # db.commit() explicite, même si autocommit est actif.
  
  
@@ -354,13 +379,15 @@ def insert_oeuvre(data: dict):
             """
             INSERT INTO oeuvres
                 (titre, type_media, auteur, saga, saison_tome, genre,
-                 pages_episodes, image_url, commentaire, statut, note,
-                 proprietaire, date_debut, date_fin, modifie_le)
+                 pages_episodes, image_url, image_data, commentaire, statut, note,
+                 proprietaire, date_debut, date_fin, langue, piment,
+                 plateforme, quantite, modifie_le)
             VALUES
                 (%(titre)s, %(type_media)s, %(auteur)s, %(saga)s, %(saison_tome)s,
-                 %(genre)s, %(pages_episodes)s, %(image_url)s, %(commentaire)s,
+                 %(genre)s, %(pages_episodes)s, %(image_url)s, %(image_data)s, %(commentaire)s,
                  %(statut)s, %(note)s, %(proprietaire)s, %(date_debut)s,
-                 %(date_fin)s, CURRENT_TIMESTAMP);
+                 %(date_fin)s, %(langue)s, %(piment)s, %(plateforme)s,
+                 %(quantite)s, CURRENT_TIMESTAMP);
             """,
             data,
         )
@@ -383,11 +410,16 @@ def update_oeuvre(oeuvre_id: int, data: dict):
                 genre = %(genre)s,
                 pages_episodes = %(pages_episodes)s,
                 image_url = %(image_url)s,
+                image_data = %(image_data)s,
                 commentaire = %(commentaire)s,
                 statut = %(statut)s,
                 note = %(note)s,
                 date_debut = %(date_debut)s,
                 date_fin = %(date_fin)s,
+                langue = %(langue)s,
+                piment = %(piment)s,
+                plateforme = %(plateforme)s,
+                quantite = %(quantite)s,
                 modifie_le = CURRENT_TIMESTAMP
             WHERE id = %(id)s;
             """,
@@ -454,6 +486,31 @@ def afficher_etoiles(note):
     return "⭐" * note + "☆" * (5 - note)
  
  
+def afficher_piments(piment):
+    if not piment:
+        return ""
+    piment = int(piment)
+    return "🌶️" * piment + "⬜" * (5 - piment)
+ 
+ 
+def minutes_vers_hhmm(total_minutes):
+    """Convertit un nombre total de minutes en chaîne 'HHh MMmin'."""
+    total_minutes = int(total_minutes or 0)
+    heures = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{heures}h{minutes:02d}min"
+ 
+ 
+def get_image_source(oeuvre: dict):
+    """Retourne l'image à afficher : priorité à l'image uploadée (base64),
+    sinon l'URL fournie, sinon None."""
+    if oeuvre.get("image_data"):
+        return f"data:image/png;base64,{oeuvre['image_data']}"
+    if oeuvre.get("image_url"):
+        return oeuvre["image_url"]
+    return None
+ 
+ 
 def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
     """Affiche une œuvre sous forme de carte stylisée 'Racing'."""
     with st.container():
@@ -461,8 +518,9 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
         col_img, col_info, col_actions = st.columns([1, 4, 2])
  
         with col_img:
-            if oeuvre.get("image_url"):
-                st.image(oeuvre["image_url"], width=80)
+            image_source = get_image_source(oeuvre)
+            if image_source:
+                st.image(image_source, width=80)
             else:
                 st.markdown("📚")
  
@@ -477,11 +535,21 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
                 sous_ligne.append(f"🔖 {oeuvre['saison_tome']}")
             if oeuvre.get("genre"):
                 sous_ligne.append(f"🎭 {oeuvre['genre']}")
+            if oeuvre.get("langue"):
+                sous_ligne.append(f"🌐 {oeuvre['langue']}")
+            if oeuvre.get("plateforme"):
+                sous_ligne.append(f"📺 {oeuvre['plateforme']}")
+            if oeuvre.get("quantite"):
+                _, unite = QUANTITE_PAR_TYPE.get(oeuvre["type_media"], ("Quantité", ""))
+                sous_ligne.append(f"🔢 {oeuvre['quantite']} {unite}")
             if sous_ligne:
                 st.caption(" • ".join(sous_ligne))
  
             if oeuvre.get("note"):
                 st.markdown(afficher_etoiles(oeuvre["note"]))
+ 
+            if oeuvre.get("piment"):
+                st.markdown(afficher_piments(oeuvre["piment"]))
  
             if oeuvre.get("commentaire"):
                 st.caption(f"💬 {oeuvre['commentaire']}")
@@ -555,6 +623,7 @@ def dialog_transfert(oeuvre_id: int):
     with col2:
         genre = st.text_input("Genre", value=oeuvre.get("genre") or "")
         note = st.slider("Note / Avis (étoiles)", min_value=0, max_value=5, value=oeuvre.get("note") or 0)
+        piment = st.slider("🌶️ Piment (contenu sexuel/érotique)", min_value=0, max_value=5, value=oeuvre.get("piment") or 0)
         commentaire = st.text_area("Commentaire", value=oeuvre.get("commentaire") or "")
         date_fin = st.date_input(
             "Date de fin",
@@ -576,11 +645,16 @@ def dialog_transfert(oeuvre_id: int):
                     "genre": genre,
                     "pages_episodes": oeuvre.get("pages_episodes"),
                     "image_url": oeuvre.get("image_url"),
+                    "image_data": oeuvre.get("image_data"),
                     "commentaire": commentaire,
                     "statut": "Bibliothèque",
                     "note": note if note > 0 else None,
+                    "piment": piment if piment > 0 else None,
                     "date_debut": date_debut,
                     "date_fin": date_fin,
+                    "langue": oeuvre.get("langue"),
+                    "plateforme": oeuvre.get("plateforme"),
+                    "quantite": oeuvre.get("quantite"),
                 },
             )
             st.session_state["dialog_transfert_id"] = None
@@ -594,19 +668,31 @@ def dialog_transfert(oeuvre_id: int):
  
 def formulaire_ajout(proprietaire_defaut: str):
     with st.expander("➕ Ajouter une nouvelle œuvre", expanded=False):
+        # Le type de média doit être choisi EN DEHORS du st.form pour pouvoir
+        # adapter dynamiquement le label du champ "quantité" (pages, épisodes,
+        # minutes, chapitres...). Les st.form n'autorisent pas le rerun
+        # immédiat sur un changement de champ interne.
+        type_media = st.selectbox("Type de média *", TYPES_MEDIA, key="type_media_ajout")
+        label_quantite, _unite = QUANTITE_PAR_TYPE.get(type_media, ("Quantité", ""))
+ 
         with st.form("form_ajout_oeuvre", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
                 titre = st.text_input("Titre *")
-                type_media = st.selectbox("Type de média *", TYPES_MEDIA)
                 auteur = st.text_input("Auteur / Réalisateur / Studio")
                 saga = st.text_input("Saga / Collection")
                 saison_tome = st.text_input("Saison / Tome")
-            with col2:
                 genre = st.text_input("Genre")
-                pages_episodes = st.text_input("Pages / Épisodes / Durée")
-                image_url = st.text_input("URL de l'image de couverture")
+                langue = st.selectbox("Langue", LANGUES)
+            with col2:
+                plateforme = st.text_input("Plateforme (Netflix, Kindle, Wattpad, papier...)")
+                quantite = st.number_input(label_quantite, min_value=0, step=1, value=0)
                 statut_initial = st.selectbox("Statut initial", STATUTS)
+                image_url = st.text_input("URL de l'image de couverture (optionnel)")
+                image_upload = st.file_uploader(
+                    "...ou charge une image depuis ton appareil",
+                    type=["png", "jpg", "jpeg", "webp"],
+                )
                 commentaire = st.text_area("Commentaire / Avis")
  
             submitted = st.form_submit_button("🏁 Ajouter à la collection", use_container_width=True)
@@ -615,6 +701,10 @@ def formulaire_ajout(proprietaire_defaut: str):
                 if not titre.strip():
                     st.warning("Le titre est obligatoire.")
                 else:
+                    image_data_b64 = None
+                    if image_upload is not None:
+                        image_data_b64 = base64.b64encode(image_upload.read()).decode("utf-8")
+ 
                     insert_oeuvre({
                         "titre": titre.strip(),
                         "type_media": type_media,
@@ -622,14 +712,19 @@ def formulaire_ajout(proprietaire_defaut: str):
                         "saga": saga or None,
                         "saison_tome": saison_tome or None,
                         "genre": genre or None,
-                        "pages_episodes": pages_episodes or None,
+                        "pages_episodes": None,
                         "image_url": image_url or None,
+                        "image_data": image_data_b64,
                         "commentaire": commentaire or None,
                         "statut": statut_initial,
                         "note": None,
+                        "piment": None,
                         "proprietaire": proprietaire_defaut,
                         "date_debut": date.today() if statut_initial != "PAL" else None,
                         "date_fin": None,
+                        "langue": langue or None,
+                        "plateforme": plateforme or None,
+                        "quantite": int(quantite) if quantite else None,
                     })
                     st.success(f"« {titre} » a été ajouté !")
                     st.rerun()
@@ -722,6 +817,38 @@ def onglet_tableau_de_bord(toutes_oeuvres: list):
         repartition_user = df["proprietaire"].value_counts().reset_index()
         repartition_user.columns = ["Utilisateur", "Nombre"]
         st.dataframe(repartition_user, use_container_width=True, hide_index=True)
+ 
+    # --- Statistiques cumulées par type de média (sur les œuvres terminées) ---
+    st.markdown("---")
+    st.markdown("**📈 Cumuls par type de média (œuvres terminées)**")
+ 
+    df_termine = df[df["statut"] == "Bibliothèque"].copy()
+    if "quantite" in df_termine.columns:
+        df_termine["quantite"] = pd.to_numeric(df_termine["quantite"], errors="coerce").fillna(0)
+    else:
+        df_termine["quantite"] = 0
+ 
+    col_films, col_series, col_livres_num, col_livres_papier = st.columns(4)
+ 
+    with col_films:
+        minutes_films = df_termine.loc[df_termine["type_media"] == "Film", "quantite"].sum()
+        st.metric("🎬 Temps cumulé Films", minutes_vers_hhmm(minutes_films))
+ 
+    with col_series:
+        episodes_series = df_termine.loc[
+            df_termine["type_media"].isin(["Série", "Anime"]), "quantite"
+        ].sum()
+        st.metric("📺 Épisodes cumulés Séries/Animes", int(episodes_series))
+ 
+    with col_livres_num:
+        chapitres_num = df_termine.loc[df_termine["type_media"] == "Livre numérique", "quantite"].sum()
+        st.metric("📱 Chapitres cumulés (Wattpad, Webtoon...)", int(chapitres_num))
+ 
+    with col_livres_papier:
+        pages_papier = df_termine.loc[
+            df_termine["type_media"].isin(["Livre", "BD/Comics", "Manga"]), "quantite"
+        ].sum()
+        st.metric("📖 Pages cumulées Livres/BD/Mangas", int(pages_papier))
  
  
 # =============================================================================

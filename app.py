@@ -11,7 +11,7 @@ import base64
 import os
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
  
 import pandas as pd
 import psycopg2
@@ -455,6 +455,18 @@ def update_statut(oeuvre_id: int, nouveau_statut: str):
     conn.commit()
  
  
+def update_statut_avec_date(oeuvre_id: int, nouveau_statut: str, date_debut):
+    """Change le statut ET fixe la date de début en même temps (utilisé pour
+    le passage PAL -> En cours, où l'utilisateur choisit sa date de début)."""
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE oeuvres SET statut = %s, date_debut = %s, modifie_le = CURRENT_TIMESTAMP WHERE id = %s;",
+            (nouveau_statut, date_debut, oeuvre_id),
+        )
+    conn.commit()
+ 
+ 
 def delete_oeuvre(oeuvre_id: int):
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -601,6 +613,26 @@ def _cle_tri_saison_tome(oeuvre: dict):
     return (1, 0, texte.lower())
  
  
+def oeuvre_modifiable(oeuvre: dict) -> bool:
+    """
+    Retourne True si l'œuvre a été créée il y a moins de 24h, et peut donc
+    encore être corrigée librement (faute de frappe, mauvaise info...).
+    Passé ce délai, le bouton 'Modifier' disparaît simplement.
+    """
+    cree_le = oeuvre.get("cree_le")
+    if cree_le is None:
+        return False
+    if isinstance(cree_le, str):
+        try:
+            cree_le = datetime.strptime(cree_le, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                cree_le = datetime.strptime(cree_le, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return False
+    return (datetime.now() - cree_le) < timedelta(hours=24)
+ 
+ 
 def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False, dans_groupe: bool = False):
     """Affiche une œuvre sous forme de carte stylisée 'Racing'.
  
@@ -665,9 +697,14 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False, dans_gro
             cle_base = f"oeuvre_{oeuvre['id']}"
  
             if oeuvre["statut"] == "PAL":
-                if st.button("▶️ Commencer", key=f"{cle_base}_commencer", use_container_width=True):
-                    update_statut(oeuvre["id"], "En cours")
-                    st.rerun()
+                with st.popover("▶️ Commencer", use_container_width=True):
+                    st.caption("Quelle est la date de début ?")
+                    date_debut_choisie = st.date_input(
+                        "Date de début", value=date.today(), key=f"{cle_base}_date_debut_commencer"
+                    )
+                    if st.button("✅ Valider", key=f"{cle_base}_valider_commencer", use_container_width=True):
+                        update_statut_avec_date(oeuvre["id"], "En cours", date_debut_choisie)
+                        st.rerun()
                 if st.button("📦 → Bibliothèque", key=f"{cle_base}_transfert", use_container_width=True):
                     st.session_state["dialog_transfert_id"] = oeuvre["id"]
  
@@ -686,6 +723,10 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False, dans_gro
             if st.button("🗑️ Supprimer", key=f"{cle_base}_suppr", use_container_width=True):
                 delete_oeuvre(oeuvre["id"])
                 st.rerun()
+ 
+            if oeuvre_modifiable(oeuvre):
+                if st.button("✏️ Modifier", key=f"{cle_base}_modifier", use_container_width=True):
+                    st.session_state["dialog_modification_id"] = oeuvre["id"]
  
         st.markdown("</div>", unsafe_allow_html=True)
  
@@ -767,17 +808,134 @@ def dialog_transfert(oeuvre_id: int):
  
  
 # =============================================================================
+# 6bis. FENÊTRE MODALE — MODIFICATION (DANS LES 24H APRÈS CRÉATION)
+# =============================================================================
+ 
+@st.dialog("✏️ Modifier l'œuvre", width="large")
+def dialog_modification(oeuvre_id: int):
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM oeuvres WHERE id = %s;", (oeuvre_id,))
+        oeuvre = cur.fetchone()
+ 
+    if oeuvre is None:
+        st.error("Cette œuvre n'existe plus.")
+        return
+ 
+    oeuvre = dict(oeuvre)
+ 
+    if not oeuvre_modifiable(oeuvre):
+        st.warning("Le délai de 24h pour modifier cette œuvre est dépassé.")
+        return
+ 
+    st.caption("Tu peux corriger une faute de frappe ou une mauvaise info ci-dessous (modifiable pendant 24h après l'ajout).")
+ 
+    label_quantite, _unite = QUANTITE_PAR_TYPE.get(oeuvre.get("type_media"), ("Quantité", ""))
+ 
+    col1, col2 = st.columns(2, gap="large")
+ 
+    with col1:
+        titre = st.text_input("Titre", value=oeuvre.get("titre") or "", key=f"mod_titre_{oeuvre_id}")
+        type_media = st.selectbox(
+            "Type de média", TYPES_MEDIA,
+            index=TYPES_MEDIA.index(oeuvre["type_media"]) if oeuvre.get("type_media") in TYPES_MEDIA else 0,
+            key=f"mod_type_{oeuvre_id}",
+        )
+        auteur = st.text_input("Auteur / Réalisateur / Studio", value=oeuvre.get("auteur") or "", key=f"mod_auteur_{oeuvre_id}")
+        saga = st.text_input("Saga / Collection", value=oeuvre.get("saga") or "", key=f"mod_saga_{oeuvre_id}")
+        saison_tome = st.text_input("Saison / Tome", value=oeuvre.get("saison_tome") or "", key=f"mod_saison_{oeuvre_id}")
+        genre = st.text_input("Genre", value=oeuvre.get("genre") or "", key=f"mod_genre_{oeuvre_id}")
+        langue = st.selectbox(
+            "Langue", LANGUES,
+            index=LANGUES.index(oeuvre["langue"]) if oeuvre.get("langue") in LANGUES else 0,
+            key=f"mod_langue_{oeuvre_id}",
+        )
+ 
+    with col2:
+        plateforme = st.text_input("Plateforme", value=oeuvre.get("plateforme") or "", key=f"mod_plateforme_{oeuvre_id}")
+        quantite = st.number_input(label_quantite, min_value=0, step=1, value=int(oeuvre.get("quantite") or 0), key=f"mod_quantite_{oeuvre_id}")
+        commentaire = st.text_area("Commentaire / Avis", value=oeuvre.get("commentaire") or "", key=f"mod_commentaire_{oeuvre_id}")
+        image_url = st.text_input("URL de l'image de couverture", value=oeuvre.get("image_url") or "", key=f"mod_image_url_{oeuvre_id}")
+        image_upload = st.file_uploader(
+            "...ou remplace par une image depuis ton appareil",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"mod_image_upload_{oeuvre_id}",
+        )
+ 
+    if oeuvre["statut"] in ("Bibliothèque",):
+        st.markdown("---")
+        col3, col4 = st.columns(2)
+        with col3:
+            date_debut = st.date_input("Date de début", value=oeuvre.get("date_debut") or date.today(), key=f"mod_date_debut_{oeuvre_id}")
+            note = st.slider("Note / Avis (étoiles)", min_value=0, max_value=5, value=oeuvre.get("note") or 0, key=f"mod_note_{oeuvre_id}")
+        with col4:
+            date_fin = st.date_input("Date de fin", value=oeuvre.get("date_fin") or date.today(), key=f"mod_date_fin_{oeuvre_id}")
+            piment = st.slider("🌶️ Piment", min_value=0, max_value=5, value=oeuvre.get("piment") or 0, key=f"mod_piment_{oeuvre_id}")
+        recommande = st.checkbox("❤️ Je recommande cette œuvre", value=bool(oeuvre.get("recommande")), key=f"mod_recommande_{oeuvre_id}")
+    else:
+        date_debut = oeuvre.get("date_debut")
+        date_fin = oeuvre.get("date_fin")
+        note = oeuvre.get("note")
+        piment = oeuvre.get("piment")
+        recommande = oeuvre.get("recommande")
+ 
+    st.markdown("---")
+    col_spacer, col_btn = st.columns([3, 1])
+    with col_btn:
+        if st.button("✅ Enregistrer", type="primary", use_container_width=True, key=f"mod_valider_{oeuvre_id}"):
+            image_data_b64 = oeuvre.get("image_data")
+            if image_upload is not None:
+                image_data_b64 = base64.b64encode(image_upload.read()).decode("utf-8")
+ 
+            update_oeuvre(
+                oeuvre_id,
+                {
+                    "titre": titre,
+                    "type_media": type_media,
+                    "auteur": auteur or None,
+                    "saga": saga or None,
+                    "saison_tome": saison_tome or None,
+                    "genre": genre or None,
+                    "pages_episodes": oeuvre.get("pages_episodes"),
+                    "image_url": image_url or None,
+                    "image_data": image_data_b64,
+                    "commentaire": commentaire or None,
+                    "statut": oeuvre["statut"],
+                    "note": note if note and note > 0 else None,
+                    "piment": piment if piment and piment > 0 else None,
+                    "date_debut": date_debut,
+                    "date_fin": date_fin,
+                    "langue": langue or None,
+                    "plateforme": plateforme or None,
+                    "quantite": int(quantite) if quantite else None,
+                    "recommande": recommande,
+                },
+            )
+            st.session_state["dialog_modification_id"] = None
+            st.success("Modifications enregistrées !")
+            st.rerun()
+ 
+ 
+# =============================================================================
 # 7. FORMULAIRE D'AJOUT D'UNE NOUVELLE ŒUVRE
 # =============================================================================
  
 def formulaire_ajout(proprietaire_defaut: str):
     with st.expander("➕ Ajouter une nouvelle œuvre", expanded=False):
-        # Le type de média doit être choisi EN DEHORS du st.form pour pouvoir
-        # adapter dynamiquement le label du champ "quantité" (pages, épisodes,
-        # minutes, chapitres...). Les st.form n'autorisent pas le rerun
-        # immédiat sur un changement de champ interne.
-        type_media = st.selectbox("Type de média *", TYPES_MEDIA, key="type_media_ajout")
+        # Le type de média ET le statut initial doivent être choisis EN
+        # DEHORS du st.form pour pouvoir adapter dynamiquement le formulaire
+        # (label de quantité selon le type, et apparition des champs
+        # "Bibliothèque" — note, piment, dates, recommandation — uniquement
+        # si on encode directement une œuvre terminée). Les st.form
+        # n'autorisent pas de rerun immédiat sur un changement de champ interne.
+        col_type, col_statut = st.columns(2)
+        with col_type:
+            type_media = st.selectbox("Type de média *", TYPES_MEDIA, key="type_media_ajout")
+        with col_statut:
+            statut_initial = st.selectbox("Statut initial", STATUTS, key="statut_initial_ajout")
+ 
         label_quantite, _unite = QUANTITE_PAR_TYPE.get(type_media, ("Quantité", ""))
+        directement_termine = statut_initial == "Bibliothèque"
  
         with st.form("form_ajout_oeuvre", clear_on_submit=True):
             col1, col2 = st.columns(2)
@@ -791,13 +949,32 @@ def formulaire_ajout(proprietaire_defaut: str):
             with col2:
                 plateforme = st.text_input("Plateforme (Netflix, Kindle, Wattpad, papier...)")
                 quantite = st.number_input(label_quantite, min_value=0, step=1, value=0)
-                statut_initial = st.selectbox("Statut initial", STATUTS)
                 image_url = st.text_input("URL de l'image de couverture (optionnel)")
                 image_upload = st.file_uploader(
                     "...ou charge une image depuis ton appareil",
                     type=["png", "jpg", "jpeg", "webp"],
                 )
                 commentaire = st.text_area("Commentaire / Avis")
+ 
+            # --- Champs supplémentaires, visibles uniquement si l'œuvre est
+            # ajoutée directement comme terminée (statut = Bibliothèque) ---
+            note = 0
+            piment = 0
+            recommande = False
+            date_debut_saisie = date.today()
+            date_fin_saisie = date.today()
+ 
+            if directement_termine:
+                st.markdown("---")
+                st.markdown("**📚 Détails de fin (puisque l'œuvre est directement en Bibliothèque)**")
+                col3, col4 = st.columns(2)
+                with col3:
+                    date_debut_saisie = st.date_input("Date de début", value=date.today())
+                    note = st.slider("Note / Avis (étoiles)", min_value=0, max_value=5, value=0)
+                with col4:
+                    date_fin_saisie = st.date_input("Date de fin", value=date.today())
+                    piment = st.slider("🌶️ Piment (contenu sexuel/érotique)", min_value=0, max_value=5, value=0)
+                recommande = st.checkbox("❤️ Je recommande cette œuvre")
  
             submitted = st.form_submit_button("🏁 Ajouter à la collection", use_container_width=True)
  
@@ -808,6 +985,16 @@ def formulaire_ajout(proprietaire_defaut: str):
                     image_data_b64 = None
                     if image_upload is not None:
                         image_data_b64 = base64.b64encode(image_upload.read()).decode("utf-8")
+ 
+                    if directement_termine:
+                        date_debut_finale = date_debut_saisie
+                        date_fin_finale = date_fin_saisie
+                    elif statut_initial != "PAL":
+                        date_debut_finale = date.today()
+                        date_fin_finale = None
+                    else:
+                        date_debut_finale = None
+                        date_fin_finale = None
  
                     insert_oeuvre({
                         "titre": titre.strip(),
@@ -821,15 +1008,15 @@ def formulaire_ajout(proprietaire_defaut: str):
                         "image_data": image_data_b64,
                         "commentaire": commentaire or None,
                         "statut": statut_initial,
-                        "note": None,
-                        "piment": None,
+                        "note": note if note > 0 else None,
+                        "piment": piment if piment > 0 else None,
                         "proprietaire": proprietaire_defaut,
-                        "date_debut": date.today() if statut_initial != "PAL" else None,
-                        "date_fin": None,
+                        "date_debut": date_debut_finale,
+                        "date_fin": date_fin_finale,
                         "langue": langue or None,
                         "plateforme": plateforme or None,
                         "quantite": int(quantite) if quantite else None,
-                        "recommande": False,
+                        "recommande": recommande,
                     })
                     st.success(f"« {titre} » a été ajouté !")
                     st.rerun()
@@ -895,6 +1082,28 @@ def onglet_tableau_de_bord(toutes_oeuvres: list):
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.bar_chart(repartition_type.set_index("Type"))
+ 
+    if "langue" in df.columns and df["langue"].notna().any():
+        st.markdown("---")
+        st.markdown("**🌐 Répartition par langue**")
+        df_langue = df[df["langue"].notna() & (df["langue"] != "")]
+        repartition_langue = df_langue["langue"].value_counts().reset_index()
+        repartition_langue.columns = ["Langue", "Nombre"]
+        if PLOTLY_OK:
+            fig_langue = px.pie(
+                repartition_langue, names="Langue", values="Nombre", hole=0.45,
+                color_discrete_sequence=px.colors.sequential.Reds_r,
+            )
+            fig_langue.update_traces(textinfo="percent+label")
+            fig_langue.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#f5f5f5",
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig_langue, use_container_width=True)
+        else:
+            st.bar_chart(repartition_langue.set_index("Langue"))
  
     if "note" in df.columns and df["note"].notna().any():
         st.markdown("---")
@@ -1079,6 +1288,8 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
                         afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode, dans_groupe=True)
                         if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
                             dialog_transfert(oeuvre["id"])
+                        if st.session_state.get("dialog_modification_id") == oeuvre["id"]:
+                            dialog_modification(oeuvre["id"])
  
     # Affichage des œuvres isolées (sans saga), comme avant.
     for oeuvre in oeuvres_isolees:
@@ -1086,6 +1297,8 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
  
         if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
             dialog_transfert(oeuvre["id"])
+        if st.session_state.get("dialog_modification_id") == oeuvre["id"]:
+            dialog_modification(oeuvre["id"])
  
  
 # =============================================================================

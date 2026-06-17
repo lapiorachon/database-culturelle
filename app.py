@@ -350,6 +350,9 @@ def init_database():
         _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS quantite INTEGER;")
         _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS image_data TEXT;")
  
+        # Marqueur "Je recommande" — coché lors du transfert vers la Bibliothèque.
+        _executer_sans_bloquer(cur, "ALTER TABLE oeuvres ADD COLUMN IF NOT EXISTS recommande BOOLEAN DEFAULT FALSE;")
+ 
     conn.commit()  # db.commit() explicite, même si autocommit est actif.
  
  
@@ -381,13 +384,13 @@ def insert_oeuvre(data: dict):
                 (titre, type_media, auteur, saga, saison_tome, genre,
                  pages_episodes, image_url, image_data, commentaire, statut, note,
                  proprietaire, date_debut, date_fin, langue, piment,
-                 plateforme, quantite, modifie_le)
+                 plateforme, quantite, recommande, modifie_le)
             VALUES
                 (%(titre)s, %(type_media)s, %(auteur)s, %(saga)s, %(saison_tome)s,
                  %(genre)s, %(pages_episodes)s, %(image_url)s, %(image_data)s, %(commentaire)s,
                  %(statut)s, %(note)s, %(proprietaire)s, %(date_debut)s,
                  %(date_fin)s, %(langue)s, %(piment)s, %(plateforme)s,
-                 %(quantite)s, CURRENT_TIMESTAMP);
+                 %(quantite)s, %(recommande)s, CURRENT_TIMESTAMP);
             """,
             data,
         )
@@ -420,6 +423,7 @@ def update_oeuvre(oeuvre_id: int, data: dict):
                 piment = %(piment)s,
                 plateforme = %(plateforme)s,
                 quantite = %(quantite)s,
+                recommande = %(recommande)s,
                 modifie_le = CURRENT_TIMESTAMP
             WHERE id = %(id)s;
             """,
@@ -525,7 +529,10 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
                 st.markdown("📚")
  
         with col_info:
-            st.markdown(f"**{oeuvre['titre']}**  ·  _{oeuvre['type_media']}_")
+            titre_ligne = f"**{oeuvre['titre']}**  ·  _{oeuvre['type_media']}_"
+            if oeuvre.get("recommande"):
+                titre_ligne += "  ❤️ **Recommandé**"
+            st.markdown(titre_ligne)
             sous_ligne = []
             if oeuvre.get("auteur"):
                 sous_ligne.append(f"✍️ {oeuvre['auteur']}")
@@ -629,6 +636,7 @@ def dialog_transfert(oeuvre_id: int):
             "Date de fin",
             value=oeuvre.get("date_fin") or date.today(),
         )
+        recommande = st.checkbox("❤️ Je recommande cette œuvre", value=bool(oeuvre.get("recommande")))
  
     st.markdown("---")
     col_spacer, col_btn = st.columns([3, 1])
@@ -655,6 +663,7 @@ def dialog_transfert(oeuvre_id: int):
                     "langue": oeuvre.get("langue"),
                     "plateforme": oeuvre.get("plateforme"),
                     "quantite": oeuvre.get("quantite"),
+                    "recommande": recommande,
                 },
             )
             st.session_state["dialog_transfert_id"] = None
@@ -725,6 +734,7 @@ def formulaire_ajout(proprietaire_defaut: str):
                         "langue": langue or None,
                         "plateforme": plateforme or None,
                         "quantite": int(quantite) if quantite else None,
+                        "recommande": False,
                     })
                     st.success(f"« {titre} » a été ajouté !")
                     st.rerun()
@@ -876,6 +886,12 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
                 "Recherche par titre", key=f"filtre_recherche_{statut}"
             )
  
+        filtre_recommande = False
+        if statut == "Bibliothèque":
+            filtre_recommande = st.checkbox(
+                "❤️ Recommandées uniquement", key=f"filtre_recommande_{statut}"
+            )
+ 
     resultat = oeuvres_du_statut
     if filtre_type:
         resultat = [o for o in resultat if o["type_media"] in filtre_type]
@@ -886,6 +902,8 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
             o for o in resultat
             if filtre_recherche.lower() in (o["titre"] or "").lower()
         ]
+    if filtre_recommande:
+        resultat = [o for o in resultat if o.get("recommande")]
  
     st.caption(f"{len(resultat)} œuvre(s) affichée(s) sur {len(oeuvres_du_statut)} au total")
  

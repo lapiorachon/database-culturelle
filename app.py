@@ -9,6 +9,7 @@
  
 import base64
 import os
+import re
 import time
 from datetime import date, datetime
  
@@ -515,8 +516,27 @@ def get_image_source(oeuvre: dict):
     return None
  
  
-def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
-    """Affiche une œuvre sous forme de carte stylisée 'Racing'."""
+def _cle_tri_saison_tome(oeuvre: dict):
+    """
+    Construit une clé de tri 'naturelle' pour le champ saison_tome, afin que
+    'Saison 2' se classe bien avant 'Saison 10' (et pas après, comme le
+    ferait un tri alphabétique classique). On extrait le premier nombre
+    trouvé dans le texte ; à défaut, on retombe sur le texte lui-même.
+    """
+    texte = (oeuvre.get("saison_tome") or "").strip()
+    match = re.search(r"\d+", texte)
+    if match:
+        return (0, int(match.group()), texte.lower())
+    return (1, 0, texte.lower())
+ 
+ 
+def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False, dans_groupe: bool = False):
+    """Affiche une œuvre sous forme de carte stylisée 'Racing'.
+ 
+    Si dans_groupe=True, la carte est affichée à l'intérieur d'un bloc de
+    saga déjà titré : on n'affiche donc pas une seconde fois le nom de la
+    saga sur la ligne d'info (déjà visible dans l'en-tête du groupe).
+    """
     with st.container():
         st.markdown('<div class="media-card">', unsafe_allow_html=True)
         col_img, col_info, col_actions = st.columns([1, 4, 2])
@@ -536,7 +556,7 @@ def afficher_carte_oeuvre(oeuvre: dict, afficher_periode: bool = False):
             sous_ligne = []
             if oeuvre.get("auteur"):
                 sous_ligne.append(f"✍️ {oeuvre['auteur']}")
-            if oeuvre.get("saga"):
+            if not dans_groupe and oeuvre.get("saga"):
                 sous_ligne.append(f"📖 {oeuvre['saga']}")
             if oeuvre.get("saison_tome"):
                 sous_ligne.append(f"🔖 {oeuvre['saison_tome']}")
@@ -916,7 +936,38 @@ def onglet_statut(statut: str, toutes_oeuvres: list):
         return
  
     afficher_periode = statut == "Bibliothèque"
+ 
+    # --- Regroupement par saga ---
+    # Les œuvres qui partagent le même nom de saga (non vide) sont
+    # regroupées sous un même bloc dépliable, triées par saison/tome.
+    # Les œuvres sans saga renseignée restent affichées individuellement.
+    groupes_saga = {}
+    oeuvres_isolees = []
     for oeuvre in resultat:
+        saga = (oeuvre.get("saga") or "").strip()
+        if saga:
+            groupes_saga.setdefault(saga, []).append(oeuvre)
+        else:
+            oeuvres_isolees.append(oeuvre)
+ 
+    # Affichage des groupes de saga, triés alphabétiquement.
+    for saga in sorted(groupes_saga.keys(), key=str.lower):
+        membres = sorted(groupes_saga[saga], key=_cle_tri_saison_tome)
+        nb = len(membres)
+        libelle_nb = f"{nb} élément{'s' if nb > 1 else ''}"
+        with st.expander(f"📖 **{saga}** — {libelle_nb}", expanded=False):
+            for oeuvre in membres:
+                label_tome = oeuvre.get("saison_tome") or oeuvre["titre"]
+                statut_emoji = {
+                    "PAL": "⏳", "En cours": "▶️", "Bibliothèque": "✅", "Abandonné": "⛔"
+                }.get(oeuvre["statut"], "")
+                with st.popover(f"🔖 {label_tome}  {statut_emoji}", use_container_width=True):
+                    afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode, dans_groupe=True)
+                    if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:
+                        dialog_transfert(oeuvre["id"])
+ 
+    # Affichage des œuvres isolées (sans saga), comme avant.
+    for oeuvre in oeuvres_isolees:
         afficher_carte_oeuvre(oeuvre, afficher_periode=afficher_periode)
  
         if st.session_state.get("dialog_transfert_id") == oeuvre["id"]:

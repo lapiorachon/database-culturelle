@@ -50,7 +50,13 @@ RACING_CSS = """
     /* Fond général sombre */
     .stApp {
         background: radial-gradient(circle at top left, #1a1a1a 0%, #0a0a0a 60%);
-        color: #f5f5f5;
+        color: #ff4d47;
+    }
+ 
+    /* Force la couleur rouge sur les éléments de texte courants de Streamlit */
+    p, span, label, .stMarkdown, .stCaption, div[data-testid="stMetricValue"],
+    div[data-testid="stMetricLabel"], .stText {
+        color: #ff4d47 !important;
     }
  
     /* Police plus agressive pour les titres */

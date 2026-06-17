@@ -622,6 +622,10 @@ def dialog_transfert(oeuvre_id: int):
         titre = st.text_input("Titre", value=oeuvre.get("titre") or "")
         saga = st.text_input("Saga", value=oeuvre.get("saga") or "")
         saison_tome = st.text_input("Saison / Tome", value=oeuvre.get("saison_tome") or "")
+        plateforme = st.text_input(
+            "Plateforme (Netflix, Disney+, Kindle, papier...)",
+            value=oeuvre.get("plateforme") or "",
+        )
         date_debut = st.date_input(
             "Date de début",
             value=oeuvre.get("date_debut") or date.today(),
@@ -661,7 +665,7 @@ def dialog_transfert(oeuvre_id: int):
                     "date_debut": date_debut,
                     "date_fin": date_fin,
                     "langue": oeuvre.get("langue"),
-                    "plateforme": oeuvre.get("plateforme"),
+                    "plateforme": plateforme or None,
                     "quantite": oeuvre.get("quantite"),
                     "recommande": recommande,
                 },
